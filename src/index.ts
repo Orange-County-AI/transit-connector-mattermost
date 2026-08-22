@@ -289,8 +289,10 @@ async function drainChannel(
       authors.get(post.user_id) ?? post.user_id,
     );
     if (!event) continue;
-    await ctx.ingest(event);
-    ingested = true;
+    // A duplicate is not news: re-seeing a post must not pin the host at
+    // burst cadence.
+    const { status } = await ctx.ingest(event);
+    if (status === "queued") ingested = true;
   }
   await ctx.storage.put(cursorKey, watermark);
 
