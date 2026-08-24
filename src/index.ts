@@ -281,6 +281,14 @@ async function drainChannel(
   let watermark = cursor;
   for (const post of ordered) {
     watermark = Math.max(watermark, post.update_at ?? post.create_at ?? watermark);
+    // `since` selects by UPDATE time, so replying in an old thread bumps its
+    // root and hands it back as if it were new. A post created before the
+    // cursor is not news whatever moved it: the cursor is only ever set to a
+    // time we had already caught up to, so anything older than it was either
+    // already relayed or predates this channel being watched. Without this an
+    // agent's own reply resurfaces the human post it was replying to - four
+    // days late, indistinguishable from a fresh request.
+    if ((post.create_at ?? 0) < cursor) continue;
     const event = await normalizePost(
       ctx,
       post,

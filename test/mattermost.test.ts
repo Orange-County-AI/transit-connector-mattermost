@@ -196,6 +196,58 @@ describe("Mattermost poller", () => {
     ).toBe(JSON.stringify({ channel_id: "c1" }));
   });
 
+  // `since` selects by update time, so replying in an old thread bumps its root
+  // and the poller is handed a four-day-old post as if it were new. Measured in
+  // production: create_at 2026-08-20T21:47Z, update_at three seconds before the
+  // delivery, edit_at never - the bot's own reply resurfaced the human post it
+  // was replying to, indistinguishable from a fresh request.
+  it("ignores an old post whose update time was bumped by a reply", async () => {
+    const h = harness();
+    seedDiscovery(
+      h,
+      [{ id: "c1", type: "O", total_msg_count: 9 }],
+      [{ channel_id: "c1", msg_count: 0, mention_count: 0 }],
+    );
+    await mattermost.poll!(h.ctx);
+    const planted = h.storage.get("cursor:c1") as number;
+
+    const ancient = planted - 4 * 24 * 60 * 60 * 1_000;
+    const bumpedAt = planted + 2_000;
+    const freshAt = planted + 3_000;
+    h.respond("GET", "/api/v4/channels/c1/posts", {
+      order: ["root", "new"],
+      posts: {
+        // Created before we were watching, dragged back by a reply's bump.
+        root: {
+          id: "root",
+          channel_id: "c1",
+          user_id: "u-9",
+          message: "@transit we need to list the event",
+          create_at: ancient,
+          update_at: bumpedAt,
+        },
+        // A genuinely new post in the same page must still be relayed, so the
+        // guard cannot just be "skip anything in a page that contains old ones".
+        new: {
+          id: "new",
+          channel_id: "c1",
+          user_id: "u-9",
+          message: "@transit and one more thing",
+          create_at: freshAt,
+          update_at: freshAt,
+        },
+      },
+    });
+    h.respond("POST", "/api/v4/users/ids", [{ id: "u-9", username: "linjing" }]);
+    h.respond("POST", "/api/v4/channels/members/bot-1/view", { status: "OK" });
+
+    await mattermost.poll!(h.ctx);
+
+    expect(h.ingested.map((event) => event.eventKey)).toEqual(["new"]);
+    // The watermark still absorbs the bump, or the same root returns every poll.
+    expect(h.storage.get("cursor:c1")).toBe(freshAt);
+  });
+
   it("backs off without throwing when the server answers 429", async () => {
     const h = harness();
     h.respond("GET", "/api/v4/users/me", { id: "bot-1", username: "transit" });
