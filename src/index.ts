@@ -1,6 +1,7 @@
 import {
   CONNECTOR_API,
   type Connector,
+  type ConnectorAttachment,
   type ConnectorCtx,
   type ConnectorEvent,
   type PollResult,
@@ -33,6 +34,13 @@ type MattermostPost = {
   file_ids?: string[];
   metadata?: { files?: unknown[] };
   props?: Record<string, unknown>;
+};
+
+type MattermostFileInfo = {
+  id: string;
+  name?: string;
+  mime_type?: string;
+  size?: number;
 };
 
 type MattermostChannel = {
@@ -108,6 +116,56 @@ async function call<T>(
     );
   }
   return (await response.json()) as T;
+}
+
+function fileInfo(value: unknown): MattermostFileInfo | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.id !== "string" || !candidate.id) return null;
+  return {
+    id: candidate.id,
+    ...(typeof candidate.name === "string" && candidate.name
+      ? { name: candidate.name }
+      : {}),
+    ...(typeof candidate.mime_type === "string" && candidate.mime_type
+      ? { mime_type: candidate.mime_type }
+      : {}),
+    ...(typeof candidate.size === "number" && Number.isFinite(candidate.size)
+      ? { size: candidate.size }
+      : {}),
+  };
+}
+
+async function postAttachments(
+  ctx: ConnectorCtx,
+  post: MattermostPost,
+): Promise<ConnectorAttachment[]> {
+  const byID = new Map<string, MattermostFileInfo>();
+  for (const value of post.metadata?.files ?? []) {
+    const info = fileInfo(value);
+    if (info) byID.set(info.id, info);
+  }
+  for (const id of post.file_ids ?? []) {
+    if (byID.has(id)) continue;
+    try {
+      byID.set(id, await call<MattermostFileInfo>(
+        ctx,
+        `/api/v4/files/${encodeURIComponent(id)}/info`,
+      ));
+    } catch (error) {
+      ctx.log("warn", "Mattermost file metadata unavailable", {
+        fileId: id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      byID.set(id, { id });
+    }
+  }
+  return [...byID.values()].slice(0, 16).map((info) => ({
+    id: info.id,
+    name: info.name || `mattermost-${info.id}`,
+    ...(info.mime_type ? { contentType: info.mime_type } : {}),
+    ...(info.size !== undefined ? { size: info.size } : {}),
+  }));
 }
 
 function machinePost(post: MattermostPost): boolean {
@@ -217,10 +275,8 @@ async function normalizePost(
   }
 
   let body = message.trim();
-  const attachmentCount = Math.max(
-    post.file_ids?.length ?? 0,
-    post.metadata?.files?.length ?? 0,
-  );
+  const attachments = await postAttachments(ctx, post);
+  const attachmentCount = attachments.length;
   if (attachmentCount > 0) {
     body += `${body ? "\n\n" : ""}[Mattermost attachments: ${attachmentCount}]`;
   }
@@ -235,6 +291,7 @@ async function normalizePost(
     user: author,
     trigger,
     content,
+    ...(attachments.length > 0 ? { attachments } : {}),
     meta: {
       channel_id: post.channel_id,
       post_id: post.id,
@@ -392,6 +449,23 @@ async function postReply(ctx: ConnectorCtx, request: ReplyRequest): Promise<void
   await ctx.settleConversation(request.conversationId);
 }
 
+async function fetchAttachment(
+  ctx: ConnectorCtx,
+  _event: ConnectorEvent,
+  attachment: ConnectorAttachment,
+): Promise<Response> {
+  const response = await ctx.fetch(
+    `${base(ctx)}/api/v4/files/${encodeURIComponent(attachment.id)}`,
+    { headers: { authorization: `Bearer ${ctx.config.bot_token}` } },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Mattermost attachment ${attachment.id} failed (${response.status})`,
+    );
+  }
+  return response;
+}
+
 const mattermost = {
   api: CONNECTOR_API,
   name: "mattermost",
@@ -410,6 +484,7 @@ const mattermost = {
   start,
   poll,
   stop,
+  fetchAttachment,
   postReply,
 } satisfies Connector;
 

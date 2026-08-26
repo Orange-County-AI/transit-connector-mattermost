@@ -12,7 +12,7 @@ Build-time Mattermost adapter for Transit. Maintains an authenticated outbound W
 
 Create a Mattermost bot account, grant it access to the relevant teams/channels, and generate a token. Transit opens `<server_url>/api/v4/websocket` with `Authorization: Bearer` and posts replies to `/api/v4/posts`.
 
-A channel mention starts a followed thread. Later posts in that thread continue arriving with `trigger="thread"` even without another mention. Attachments are reported in event content; file download is outside v1.
+A channel mention starts a followed thread. Later posts in that thread continue arriving with `trigger="thread"` even without another mention. File metadata is stored with the event; authenticated bytes are fetched only when the assigned agent calls `read_message`, then Transit materializes them into that agent's local attachment directory.
 
 ```bash
 bun install

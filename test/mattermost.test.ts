@@ -70,10 +70,15 @@ function harness(overrides: Record<string, string> = {}): Harness {
       const canned =
         responses.get(key) ?? responses.get(`${request.method} ${url.pathname}`);
       if (!canned) throw new Error(`unexpected Mattermost call: ${key}`);
-      return new Response(JSON.stringify(canned.body), {
-        status: canned.status,
-        headers: { "content-type": "application/json", ...canned.headers },
-      });
+      return new Response(
+        canned.body instanceof Uint8Array
+          ? canned.body
+          : JSON.stringify(canned.body),
+        {
+          status: canned.status,
+          headers: { "content-type": "application/json", ...canned.headers },
+        },
+      );
     }) as typeof fetch,
     scheduleWake: () => undefined,
     settleConversation: async () => undefined,
@@ -301,6 +306,52 @@ describe("Mattermost normalisation", () => {
       "lee",
     );
     expect(reply).toMatchObject({ trigger: "thread", conversationId: "c1:p1" });
+  });
+
+  it("declares attachment metadata and streams the authenticated file", async () => {
+    const h = harness();
+    h.respond("GET", "/api/v4/files/file-1/info", {
+      id: "file-1",
+      name: "brief.pdf",
+      mime_type: "application/pdf",
+      size: 3,
+    });
+    const event = await normalizePost(
+      h.ctx,
+      {
+        id: "p-file",
+        channel_id: "c1",
+        user_id: "u-1",
+        message: "@transit review this",
+        file_ids: ["file-1"],
+      },
+      channel,
+      self,
+      "kim",
+    );
+    expect(event?.attachments).toEqual([
+      {
+        id: "file-1",
+        name: "brief.pdf",
+        contentType: "application/pdf",
+        size: 3,
+      },
+    ]);
+
+    h.respond(
+      "GET",
+      "/api/v4/files/file-1",
+      new Uint8Array([1, 2, 3]),
+      200,
+      { "content-type": "application/pdf" },
+    );
+    const response = await mattermost.fetchAttachment!(
+      h.ctx,
+      event!,
+      event!.attachments![0]!,
+    );
+    expect(response.headers.get("content-type")).toBe("application/pdf");
+    expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([1, 2, 3]);
   });
 
   it("ignores near-miss mentions, machine posts, deletions, and its own posts", async () => {
