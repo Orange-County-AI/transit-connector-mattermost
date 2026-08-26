@@ -137,19 +137,55 @@ describe("Mattermost poller", () => {
     ]);
   });
 
-  it("plants a cursor on first sight instead of replaying history", async () => {
+  it("bounds first sight to a short lookback instead of replaying history", async () => {
     const h = harness();
     seedDiscovery(
       h,
       [{ id: "c1", type: "D", total_msg_count: 3 }],
       [{ channel_id: "c1", msg_count: 0, mention_count: 0 }],
     );
+    h.respond("GET", "/api/v4/channels/c1/posts", { posts: {} });
+    h.respond("POST", "/api/v4/channels/members/bot-1/view", { status: "OK" });
 
+    const before = Date.now();
     const result = await mattermost.poll!(h.ctx);
     expect(result).toEqual({ activity: false });
     expect(h.ingested).toHaveLength(0);
     expect(h.storage.get("cursor:c1")).toEqual(expect.any(Number));
-    expect(h.routes.some((route) => route.path.includes("/posts"))).toBe(false);
+    expect(h.storage.get("cursor:c1") as number).toBeLessThan(before);
+    expect(h.routes.some((route) => route.path.includes("/posts"))).toBe(true);
+  });
+
+  it("does not lose the first message that creates a new direct channel", async () => {
+    const h = harness();
+    const postedAt = Date.now() - 1_000;
+    seedDiscovery(
+      h,
+      [{ id: "new-dm", type: "D", total_msg_count: 1 }],
+      [{ channel_id: "new-dm", msg_count: 0, mention_count: 0 }],
+    );
+    h.respond("GET", "/api/v4/channels/new-dm/posts", {
+      posts: {
+        first: {
+          id: "first",
+          channel_id: "new-dm",
+          user_id: "u-9",
+          message: "first message",
+          create_at: postedAt,
+          update_at: postedAt,
+        },
+      },
+    });
+    h.respond("POST", "/api/v4/users/ids", [{ id: "u-9", username: "dana" }]);
+    h.respond("POST", "/api/v4/channels/members/bot-1/view", { status: "OK" });
+
+    expect(await mattermost.poll!(h.ctx)).toEqual({ activity: true });
+    expect(h.ingested).toHaveLength(1);
+    expect(h.ingested[0]).toMatchObject({
+      eventKey: "first",
+      conversationId: "new-dm",
+      trigger: "dm",
+    });
   });
 
   it("drains unread direct messages, advances the cursor, and marks read", async () => {
@@ -159,11 +195,8 @@ describe("Mattermost poller", () => {
       [{ id: "c1", type: "D", total_msg_count: 3 }],
       [{ channel_id: "c1", msg_count: 0, mention_count: 0 }],
     );
-    await mattermost.poll!(h.ctx);
-
-    // The planted cursor is "now"; a real post always lands after it, and the
-    // watermark must never travel backwards.
-    const planted = h.storage.get("cursor:c1") as number;
+    const planted = Date.now();
+    h.storage.set("cursor:c1", planted);
     const postedAt = planted + 1_000;
     h.respond("GET", "/api/v4/channels/c1/posts", {
       order: ["p1"],
@@ -213,8 +246,8 @@ describe("Mattermost poller", () => {
       [{ id: "c1", type: "O", total_msg_count: 9 }],
       [{ channel_id: "c1", msg_count: 0, mention_count: 0 }],
     );
-    await mattermost.poll!(h.ctx);
-    const planted = h.storage.get("cursor:c1") as number;
+    const planted = Date.now();
+    h.storage.set("cursor:c1", planted);
 
     const ancient = planted - 4 * 24 * 60 * 60 * 1_000;
     const bumpedAt = planted + 2_000;

@@ -66,6 +66,7 @@ type PostsResponse = {
 };
 
 type Identity = { id: string; username: string };
+const FIRST_SIGHT_LOOKBACK_MS = 2 * 60_000;
 
 // One cycle never fans out without bound: a backlog is drained across cycles,
 // and reporting activity keeps the host at burst cadence until it is gone.
@@ -310,13 +311,13 @@ async function drainChannel(
   self: Identity,
 ): Promise<boolean> {
   const cursorKey = `cursor:${channel.id}`;
-  const cursor = await ctx.storage.get<number>(cursorKey);
-  if (cursor === undefined) {
-    // First sight of a channel: start at now. Transit is a live relay, not a
-    // backfill tool, and replaying history would fan out stale deliveries.
-    await ctx.storage.put(cursorKey, Date.now());
-    return false;
-  }
+  // A channel can be created by its first DM. Starting at "now" silently drops
+  // that exact message, then marks the new channel read. A bounded lookback
+  // admits the first post without turning connector startup into a history
+  // replay; older posts are rejected again below by create_at < cursor.
+  const cursor =
+    (await ctx.storage.get<number>(cursorKey)) ??
+    Date.now() - FIRST_SIGHT_LOOKBACK_MS;
 
   const page = await call<PostsResponse>(
     ctx,
